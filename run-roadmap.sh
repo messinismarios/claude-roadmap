@@ -271,7 +271,7 @@ NTFY_VERBOSE=false                               # false: only ping the phone fo
 MAX_TURN_BUDGET_USD=""                           # empty: no per-turn cost cap. Set e.g. "5.00" to pass --max-budget-usd to every claude invocation.
 RETRY_WAIT_SECONDS=1800
 MAX_NON_QUOTA_RETRIES=3
-MAX_REVIEW_CYCLES=2
+MAX_REVIEW_CYCLES=6
 UNIT_TIMEOUT_SECONDS=10800
 BACKGROUND_WAIT_SECONDS=120
 MAX_BACKGROUND_NUDGES=15
@@ -1890,6 +1890,14 @@ actual content, but cover all of these sections, in this order):
    Write this section as if you suspect a careless implementation could
    have silently cut a corner -- the checklist should be able to catch it,
    not just confirm the obvious happy path.
+
+Formatting: write prose paragraphs as a single continuous line each, with no
+manual line-wrapping (do not break a paragraph onto multiple lines at ~80
+columns the way a text editor would). Our markdown reader renders every
+newline literally instead of reflowing soft-wrapped text, so hard-wrapped
+paragraphs show up as broken, choppy lines -- let the reader's own word-wrap
+handle line breaks within a paragraph. Line breaks are fine (expected, even)
+between headings, list items, and paragraphs -- just not inside one.
 
 Do not edit any product code, and do not edit ${ROADMAP_FILE} yourself.
 
