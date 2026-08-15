@@ -1427,9 +1427,9 @@ build_plan_prompt() {
 You are starting with zero prior conversation context, running unattended in
 ${REPO_DESCRIPTION}
 
-First read ${ROADMAP_FILE} in full (not just the phase below -- it has
-cross-cutting sections like the Cut list's "Never cut" and the exit criteria
-of earlier phases that later work must not silently break) and these spec
+First read ${ROADMAP_FILE} in full (not just the phase below -- it may have
+cross-cutting sections, like a "never do X" list or the exit criteria of
+earlier phases, that later work must not silently break) and these spec
 files: ${SPEC_FILES}.
 
 This is a PLANNING turn, not an implementation turn -- do not write or commit
@@ -1459,11 +1459,10 @@ Write your decision to ${plan_file}:
 - If you decide TO split, write 2-6 lines, one per task, in the order they
   should be implemented, and nothing else in the file. Each line must be a
   single self-contained instruction sentence that names which roadmap
-  deliverable(s) it covers (so nothing gets dropped), e.g. "Build the Prisma
-  schema for organisations, memberships, and the single-owner role matrix
-  (roadmap 'Organisations, memberships, roles, invitations' and 'Role matrix
-  and the single-owner rule' deliverables of this phase)." Requirements for
-  the split itself:
+  deliverable(s) it covers (so nothing gets dropped), e.g. "Build the
+  database schema for organisations, memberships, and the role matrix
+  (roadmap 'Organisations, memberships, roles, invitations' and 'Role matrix'
+  deliverables of this phase)." Requirements for the split itself:
   - Order tasks so each is buildable on top of the commits of the ones
     before it -- they will run as separate turns, each starting fresh with
     no memory of the others, seeing only what previous tasks already
@@ -1617,10 +1616,11 @@ picking one, they are easy to conflate:
    ${ROADMAP_FILE} that has not been built yet (not "is hard" or "is
    ambiguous" -- genuinely cannot exist until that other phase ships), or (b)
    it requires an operator-only action nobody but a human can take from
-   outside this machine (registering the legal entity, creating real App
-   Store Connect / Play Console entries, obtaining a production credential
-   from a provider's dashboard, DNS changes on a domain you don't control) --
-   as opposed to merely a credential to VERIFY already-complete code, which
+   outside this machine (registering a legal entity, creating accounts or
+   app-store/marketplace entries under a provider's dashboard, obtaining a
+   production credential that requires identity verification, DNS changes on
+   a domain you don't control) -- as opposed to merely a credential to VERIFY
+   already-complete code, which
    is COMPLETE per above, not this. Do not use PARTIAL as a way to skip
    something merely difficult or time-consuming -- only for a genuine
    external dependency. Commit everything you did finish, the same as in
@@ -2176,4 +2176,9 @@ done
 
 CURRENT_UNIT_LABEL=""
 STOP_KIND="normal-complete"
-stop_run 0 "All automatable units through Phase ${LAST_AUTOMATABLE_PHASE} complete. Phase 10 (hardening and beta launch) needs the legal track closed and real-world operator work (pilot venues, live Stripe keys, public launch) -- see ${ROADMAP_FILE}."
+FINAL_MSG="All automatable units through Phase ${LAST_AUTOMATABLE_PHASE} complete."
+HIGHEST_PHASE_NUM="${PHASE_NUMS_SORTED[-1]:-$LAST_AUTOMATABLE_PHASE}"
+if (( HIGHEST_PHASE_NUM > LAST_AUTOMATABLE_PHASE )); then
+    FINAL_MSG="$FINAL_MSG Phases beyond ${LAST_AUTOMATABLE_PHASE} are configured (LAST_AUTOMATABLE_PHASE in this repo's roadmap.config.sh) as needing something no headless run can do or verify -- see ${ROADMAP_FILE}."
+fi
+stop_run 0 "$FINAL_MSG"
