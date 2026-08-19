@@ -81,17 +81,20 @@
 #                run for manual review, same as exhausting the ordinary
 #                failure retry budget does.
 #   5. DOCUMENT (per unit, once every task has cleared IMPLEMENT->GATE->
-#                REVIEW) -- one more fresh-context turn, reading this unit's
-#                full diff (every task's commits combined) plus the roadmap
-#                and its spec files, that writes a single
-#                specs/qa/<unit-slug>.md file: what shipped, how it was
-#                built, what files changed, what was deferred and why, and a
-#                step-by-step MANUAL TESTING CHECKLIST a human with no other
-#                context can follow to actually exercise everything the unit
-#                touched. This is the primary artifact a human reviewer
-#                reads -- see build_document_prompt below. A unit only
-#                becomes "complete" (progress file + roadmap.md heading
-#                marker + commit) once this document exists.
+#                REVIEW) -- OPTIONAL, off by default (see WRITE_QA_DOC below):
+#                one more fresh-context turn, reading this unit's full diff
+#                (every task's commits combined) plus the roadmap and its
+#                spec files, that writes a single specs/qa/<unit-slug>.md
+#                file: what shipped, how it was built, what files changed,
+#                what was deferred and why, and a step-by-step MANUAL TESTING
+#                CHECKLIST a human with no other context can follow to
+#                actually exercise everything the unit touched. This is the
+#                primary artifact a human reviewer reads -- see
+#                build_document_prompt below. A unit becomes "complete"
+#                (progress file + roadmap.md heading marker + commit)
+#                whether or not this stage ran -- set WRITE_QA_DOC=true (in
+#                the repo's roadmap.config.sh, or per-run as an env var) to
+#                enable it.
 #
 # INTERACTIVITY: while a turn is running, three commands can be sent from
 # another terminal via `scripts/roadmap-ctl.sh` (see that file):
@@ -172,7 +175,8 @@
 #      run was resumed in between. Also written once, never rewritten.
 #   3. specs/qa/<unit-slug>.md -- the DOCUMENT stage's output, one file per
 #      completed unit, committed permanently. This is the file a human
-#      actually reads; see stage 5 above.
+#      actually reads; see stage 5 above. Only written when WRITE_QA_DOC=true
+#      (default false -- the stage is skipped otherwise).
 #   4. specs/roadmap.md itself -- once a unit completes, its own `## Phase N`
 #      heading line gets a trailing "**(complete)**" marker (or
 #      "**(complete -- N item(s) deferred -- see 'Roadmap automation notes'
@@ -268,6 +272,7 @@ CROSS_CUTTING_CONSTRAINTS=""                     # repo-specific hard rules fed 
 SHARED_MODULE_SYNC_NOTE=""                       # note about shared/cross-cutting modules that must move together with their consumers
 NTFY_TOPIC=""                                    # ntfy.sh topic for phone push notifications, or "" to disable
 NTFY_VERBOSE=false                               # false: only ping the phone for run start/stop, unit/phase completion, quota waits. true: ping on every notify().
+WRITE_QA_DOC=false                               # false (default): skip the DOCUMENT stage entirely -- no specs/qa/<unit-slug>.md is written. true: run it as described in stage 5 above. Override per-run without touching the config file, e.g. `WRITE_QA_DOC=true bash run-roadmap.sh`.
 MAX_TURN_BUDGET_USD=""                           # empty: no per-turn cost cap. Set e.g. "5.00" to pass --max-budget-usd to every claude invocation.
 RETRY_WAIT_SECONDS=1800
 MAX_NON_QUOTA_RETRIES=3
@@ -2145,34 +2150,40 @@ EOF
     # -----------------------------------------------------------------
     # DOCUMENT -- one high-quality QA/summary doc per completed unit,
     # covering every task's combined diff. See build_document_prompt and
-    # stage 5 in the file header. A unit is not marked complete until this
-    # exists.
+    # stage 5 in the file header. Optional: gated by WRITE_QA_DOC (default
+    # false -- see the config default above), since it's a whole extra
+    # Claude turn per unit that not every run wants. A unit is marked
+    # complete regardless of whether this stage ran.
     # -----------------------------------------------------------------
-    set_stage "writing QA document for $LABEL"
-    unit_deferred_items "$UNIT"
-    DEFERRED_BLOCK=""
-    if (( ${#DEFERRED_ITEM_TEXTS[@]} > 0 )); then
-        DEFERRED_BLOCK=$'\n'"THIS UNIT DEFERRED ${#DEFERRED_ITEM_TEXTS[@]} DELIVERABLE(S):"$'\n'
-        for di in "${!DEFERRED_ITEM_TEXTS[@]}"; do
-            DEFERRED_BLOCK+="- \"${DEFERRED_ITEM_TEXTS[$di]}\" -- ${DEFERRED_ITEM_REASONS[$di]}"$'\n'
-        done
+    if [[ "$WRITE_QA_DOC" == "true" ]]; then
+        set_stage "writing QA document for $LABEL"
+        unit_deferred_items "$UNIT"
+        DEFERRED_BLOCK=""
+        if (( ${#DEFERRED_ITEM_TEXTS[@]} > 0 )); then
+            DEFERRED_BLOCK=$'\n'"THIS UNIT DEFERRED ${#DEFERRED_ITEM_TEXTS[@]} DELIVERABLE(S):"$'\n'
+            for di in "${!DEFERRED_ITEM_TEXTS[@]}"; do
+                DEFERRED_BLOCK+="- \"${DEFERRED_ITEM_TEXTS[$di]}\" -- ${DEFERRED_ITEM_REASONS[$di]}"$'\n'
+            done
+        fi
+        DOC_SLUG="$(echo "$LABEL" | tr '[:upper:]' '[:lower:]' | sed -E 's/[^a-z0-9]+/-/g; s/^-+|-+$//g')"
+        DOC_PATH="${QA_DIR}/${DOC_SLUG}.md"
+        DOC_MARKER="${MARKER}_DOC"
+        build_document_prompt "$LABEL" "$DOC_MARKER" "$(unit_start_head_for "$UNIT")" "$DOC_PATH" "$DEFERRED_BLOCK" "$(unit_review_notes_for "$UNIT")"
+        run_claude_turn "$LABEL (document)" "$DOCUMENT_PROMPT_INIT" "$DOCUMENT_PROMPT_CONTINUE" \
+            "${DOC_MARKER}_WRITTEN" "${DOC_MARKER}_FAILED"
+        if [[ ! -s "$DOC_PATH" ]]; then
+            notify_important "$LABEL: document turn reported success but ${DOC_PATH} is missing/empty -- writing a minimal fallback so QA still has something to read."
+            {
+                echo "# $LABEL -- QA notes (fallback, auto-generated)"
+                echo
+                echo "The automated documentation turn did not leave a readable file behind."
+                echo "Commits for this unit: see \`git log --oneline $(unit_start_head_for "$UNIT")..HEAD\`."
+            } > "$DOC_PATH"
+        fi
+        notify "$LABEL: QA/testing document written to $DOC_PATH"
+    else
+        notify "$LABEL: skipping QA document (WRITE_QA_DOC is not true)."
     fi
-    DOC_SLUG="$(echo "$LABEL" | tr '[:upper:]' '[:lower:]' | sed -E 's/[^a-z0-9]+/-/g; s/^-+|-+$//g')"
-    DOC_PATH="${QA_DIR}/${DOC_SLUG}.md"
-    DOC_MARKER="${MARKER}_DOC"
-    build_document_prompt "$LABEL" "$DOC_MARKER" "$(unit_start_head_for "$UNIT")" "$DOC_PATH" "$DEFERRED_BLOCK" "$(unit_review_notes_for "$UNIT")"
-    run_claude_turn "$LABEL (document)" "$DOCUMENT_PROMPT_INIT" "$DOCUMENT_PROMPT_CONTINUE" \
-        "${DOC_MARKER}_WRITTEN" "${DOC_MARKER}_FAILED"
-    if [[ ! -s "$DOC_PATH" ]]; then
-        notify_important "$LABEL: document turn reported success but ${DOC_PATH} is missing/empty -- writing a minimal fallback so QA still has something to read."
-        {
-            echo "# $LABEL -- QA notes (fallback, auto-generated)"
-            echo
-            echo "The automated documentation turn did not leave a readable file behind."
-            echo "Commits for this unit: see \`git log --oneline $(unit_start_head_for "$UNIT")..HEAD\`."
-        } > "$DOC_PATH"
-    fi
-    notify "$LABEL: QA/testing document written to $DOC_PATH"
 
     set_stage "finalizing $LABEL"
     record_unit_complete "$UNIT"

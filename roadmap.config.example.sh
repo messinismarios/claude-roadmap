@@ -105,6 +105,14 @@ LAST_AUTOMATABLE_PHASE=
 # fast instead of blindly retrying into the same wall three times.
 # MAX_TURN_BUDGET_USD=""
 
+# false (default): skip the DOCUMENT stage -- no specs/qa/<unit-slug>.md is
+# written for completed units. true: run it, producing a QA/manual-testing
+# doc per unit (see stage 5 in run-roadmap.sh's header). It's a whole extra
+# Claude turn per unit, so it's off unless you actually want that doc. Can
+# also be set per-run without editing this file, e.g.:
+#   WRITE_QA_DOC=true bash run-roadmap.sh
+# WRITE_QA_DOC=false
+
 # Retry/timeout tuning -- the defaults are reasonable for most repos, change
 # only if you have a specific reason to.
 # RETRY_WAIT_SECONDS=1800       # wait after a quota/rate-limit hit before retrying

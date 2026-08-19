@@ -30,12 +30,14 @@ five-stage pipeline, each stage its own fresh-context, zero-memory Claude turn:
    violating a constraint stated elsewhere in the roadmap, spec files, or the repo's
    own `CROSS_CUTTING_CONSTRAINTS`. Reports `REVIEW_OK` or `REVIEW_ISSUES`; issues get
    fed into a fresh implement retry (bounded by `MAX_REVIEW_CYCLES`).
-5. **DOCUMENT** (per unit, once every task clears the above) — writes
-   `specs/qa/<unit-slug>.md`: what shipped, how, what was deferred, and a step-by-step
-   manual testing checklist for a human with no other context.
+5. **DOCUMENT** (per unit, once every task clears the above) — optional, off by
+   default (see `WRITE_QA_DOC` below). When enabled, writes `specs/qa/<unit-slug>.md`:
+   what shipped, how, what was deferred, and a step-by-step manual testing checklist
+   for a human with no other context.
 
-A unit is only marked complete (progress file + a `**(complete)**` marker appended to
-its own roadmap heading + a commit) once its QA document exists.
+A unit is marked complete (progress file + a `**(complete)**` marker appended to its
+own roadmap heading + a commit) once every task clears review, whether or not the
+QA document was written.
 
 **Also handles, so you can leave it running unattended overnight:**
 
@@ -107,6 +109,7 @@ plain shell variable assignment, sourced directly by `run-roadmap.sh`.
 | `NTFY_TOPIC` | no (default empty — disabled) | ntfy.sh topic for phone push notifications. |
 | `NTFY_VERBOSE` | no (default `false`) | Ping the phone on every notification, not just major transitions. |
 | `MAX_TURN_BUDGET_USD` | no (default empty — no cap) | Per-turn `--max-budget-usd` passed to `claude`. |
+| `WRITE_QA_DOC` | no (default `false`) | Run the DOCUMENT stage and write `specs/qa/<unit-slug>.md` per unit. Can also be set per-run as an env var, e.g. `WRITE_QA_DOC=true bash run-roadmap.sh`. |
 | `RETRY_WAIT_SECONDS`, `MAX_NON_QUOTA_RETRIES`, `MAX_REVIEW_CYCLES`, `UNIT_TIMEOUT_SECONDS`, `BACKGROUND_WAIT_SECONDS`, `MAX_BACKGROUND_NUDGES`, `POLL_INTERVAL_SECONDS`, `STOP_GRACE_SECONDS` | no | Retry/timeout tuning; sane defaults, see the example file. |
 
 Override which config file gets loaded with `$ROADMAP_CONFIG_FILE` or a first
