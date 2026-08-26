@@ -17,10 +17,15 @@ five-stage pipeline, each stage its own fresh-context, zero-memory Claude turn:
 1. **PLAN** — decides whether the phase is small enough for one turn, or should be
    split into several independently-implementable tasks. Written once to
    `specs/.roadmap-tasks/<unit>.tasks`; never re-planned on resume.
-2. **IMPLEMENT** (per task) — does the work, commits it. Ends in one of three states:
+2. **IMPLEMENT** (per task) — does the work, commits it. Ends in one of four states:
    `COMPLETE`, `PARTIAL` (everything done except a deliverable that genuinely can't be
-   done yet — a later phase's dependency, or an operator-only action), or `FAILED`
-   (truly blocked).
+   done yet — a later phase's dependency, or an operator-only action — the run keeps
+   going), `NEEDS_INPUT` (blocked on something only you can provide right now — a real
+   API key/secret, a third-party account/registration, a decision only you can make —
+   where the result would be materially worse without it; unlike `PARTIAL` this **stops
+   the entire run immediately**, pings your phone, and writes exactly what's needed into
+   `specs/ROADMAP-RESUME.md` so you can provide it and re-run), or `FAILED` (truly
+   blocked, retried then eventually stops the run).
 3. **GATE** (per task) — plain bash, no LLM: independently re-runs the repo's own
    `GATE_CMD` (see [Configuration](#configuration)) outside the implementer's control,
    so a turn can never claim a green check it never actually got. Skipped entirely if

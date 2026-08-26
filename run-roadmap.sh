@@ -41,16 +41,24 @@
 #                means no split). This file is the durable plan -- on resume
 #                it is loaded instead of re-planned.
 #   2. IMPLEMENT (per task) -- does the work for exactly one task, commits to
-#                the repo. Ends with one of three outcomes: COMPLETE
+#                the repo. Ends with one of FOUR outcomes: COMPLETE
 #                (everything done), PARTIAL (everything done except one or
 #                more deliverables that genuinely depend on a phase not yet
 #                built or an operator-only action -- named verbatim so the
 #                roadmap bookkeeping step can record exactly that, see
-#                TRACKING #3 below), or FAILED (truly blocked, retried then
-#                eventually stops the run). PARTIAL still goes through GATE
-#                and REVIEW like a normal completion -- it is not a lower
-#                bar, just an honest one, and the reviewer is specifically
-#                asked to judge whether the deferral is legitimate.
+#                TRACKING #3 below), NEEDS_INPUT (genuinely blocked on
+#                something only the human operator can provide -- a real
+#                API key/secret, a third-party account or app registration,
+#                a business/legal decision -- where skipping or deferring it
+#                would leave the result materially worse, not just
+#                unverified. Unlike PARTIAL, this is NOT a "continue and
+#                note it" situation: it halts the entire run immediately, see
+#                NEEDS_INPUT HANDLING below), or FAILED (truly blocked,
+#                retried then eventually stops the run). PARTIAL still goes
+#                through GATE and REVIEW like a normal completion -- it is
+#                not a lower bar, just an honest one, and the reviewer is
+#                specifically asked to judge whether the deferral is
+#                legitimate.
 #   3. GATE   (per task) -- plain bash, no LLM: independently re-runs the
 #                target repo's own verification command (GATE_CMD from its
 #                config -- lint/typecheck/test, terraform validate, whatever
@@ -95,6 +103,22 @@
 #                whether or not this stage ran -- set WRITE_QA_DOC=true (in
 #                the repo's roadmap.config.sh, or per-run as an env var) to
 #                enable it.
+#
+# NEEDS_INPUT HANDLING: when an implement turn reports NEEDS_INPUT (see
+# stage 2 above), this script does NOT retry, does NOT defer-and-continue
+# like PARTIAL, and does NOT move on to another task or phase. It stops the
+# whole run immediately (same STOP-machinery as an exhausted retry budget --
+# see stop_run), pings the phone via ntfy regardless of NTFY_VERBOSE, and
+# writes what's needed and why into RESUME_DOC in its own clearly-marked
+# section. The task itself is NOT marked complete, so re-running the script
+# after providing whatever was requested (a secret in Dokploy's encrypted
+# store, a completed account registration, a decision recorded wherever this
+# repo's conventions say it belongs, etc.) retries that exact task from
+# scratch. This exists because unattended automation must never quietly
+# ship degraded work, guess at a placeholder for a real credential, or
+# silently defer something whose absence would actually hurt the result --
+# those cases need a human in the loop before another dollar or another
+# turn is spent building on top of a guess.
 #
 # INTERACTIVITY: while a turn is running, three commands can be sent from
 # another terminal via `scripts/roadmap-ctl.sh` (see that file):
@@ -568,8 +592,10 @@ CURRENT_STAGE="starting up"
 CURRENT_TASK_INDEX=""
 CURRENT_TASK_TOTAL=""
 CURRENT_TASK_SCOPE=""
-STOP_KIND="unknown"      # normal-complete | user-stop | error | nothing-to-do
+STOP_KIND="unknown"      # normal-complete | user-stop | error | nothing-to-do | needs-input
 STOP_REASON=""
+NEEDS_INPUT_ITEM=""      # set when STOP_KIND=needs-input -- what the operator must provide, see write_resume_doc
+NEEDS_INPUT_REASON=""    # set when STOP_KIND=needs-input -- why the result would be worse without it
 
 # In-flight retry state for whichever task is currently being worked, kept
 # in sync with the real loop variables (FINDINGS/gate_fail_count/
@@ -662,6 +688,7 @@ write_resume_doc() {
         user-stop)       kind_label="Stopped by operator (/stop)" ;;
         nothing-to-do)   kind_label="Nothing to do -- already up to date" ;;
         error)           kind_label="Stopped on error -- needs manual review" ;;
+        needs-input)     kind_label="ACTION REQUIRED -- blocked on information/action only you can provide" ;;
         *)               kind_label="Stopped (exit code $exit_code)" ;;
     esac
 
@@ -671,6 +698,21 @@ write_resume_doc() {
     local resume_how
     if [[ "$STOP_KIND" == "normal-complete" || "$STOP_KIND" == "nothing-to-do" ]]; then
         resume_how="Nothing to resume. All automatable units through Phase ${LAST_AUTOMATABLE_PHASE} are marked complete in ${PROGRESS_FILE}."
+    elif [[ "$STOP_KIND" == "needs-input" ]]; then
+        resume_how=$(cat <<EOF
+Provide what's requested in "What's needed" below FIRST -- add the
+secret/credential to wherever this repo's own conventions say it belongs
+(e.g. Dokploy's encrypted store, a committed \`.example\` file with the real
+value filled in only in the real secret store, never in git), finish the
+account/registration, or make the decision yourself. Do NOT just re-run the
+script without doing that -- this exact task will hit the same block again
+and stop again. Once it's actually provided, re-run the script as usual:
+    scripts\\run-roadmap.bat      (Windows, double-click or run from any shell)
+    bash scripts/run-roadmap.sh   (Git Bash / macOS / Linux)
+The blocked task was NOT marked complete, so it will be retried from
+scratch with the new information available.
+EOF
+)
     else
         resume_how=$(cat <<EOF
 Just re-run the script -- it resumes automatically from ${PROGRESS_FILE},
@@ -719,6 +761,17 @@ it at the next task/phase boundary unless cancelled first with
 \`scripts/roadmap-ctl.sh cancel-stop-after\`."
     fi
 
+    local needs_input_note=""
+    if [[ "$STOP_KIND" == "needs-input" ]]; then
+        needs_input_note=$(cat <<EOF
+
+## What's needed
+- **Needed:** ${NEEDS_INPUT_ITEM:-<not specified>}
+- **Why:** ${NEEDS_INPUT_REASON:-<not specified>}
+EOF
+)
+    fi
+
     local cost_line="" total_cost
     total_cost="$(sum_cost_file)"
     [[ -n "$total_cost" ]] && cost_line="**Total spend recorded (${COST_FILE}):** \$${total_cost}"
@@ -750,6 +803,7 @@ it at the next task/phase boundary unless cancelled first with
         fi
         echo "- Git HEAD: ${head_line}"
         [[ -n "$task_state_note" ]] && echo "${task_state_note}"
+        [[ -n "$needs_input_note" ]] && echo "${needs_input_note}"
         echo
         echo "## How to resume"
         echo "${resume_how}"
@@ -1605,7 +1659,7 @@ finish yourself and check its result before ending your turn -- do not end
 your turn early expecting a background task or a scheduled check-in to
 report back, because no such notification will ever arrive on its own.
 
-When you are done, you have THREE possible outcomes -- read all three before
+When you are done, you have FOUR possible outcomes -- read all four before
 picking one, they are easy to conflate:
 
 1. COMPLETE -- every deliverable this task covers is actually implemented
@@ -1638,9 +1692,35 @@ picking one, they are easy to conflate:
    legitimate -- an unjustified PARTIAL comes back as review issues exactly
    like an incomplete COMPLETE would.
 
-3. FAILED -- you cannot finish this task AT ALL (truly blocked: ambiguous
+3. NEEDS_INPUT -- you are NOT ambiguous about what to build, and this is NOT
+   a later-phase dependency or an operator-only action you can cleanly defer
+   (that's PARTIAL, above). You are blocked because doing this task properly
+   requires something only the human operator can provide RIGHT NOW, and the
+   result would be materially worse without it -- e.g. a real third-party
+   API key/secret/credential the code needs to actually function (not just
+   to be verified -- a missing verification-only credential is COMPLETE per
+   VERIFICATION above), a third-party account/app/marketplace registration
+   that gates what you're building, a business/legal/product decision only
+   the operator can make, or data only the operator has. Do NOT invent a
+   placeholder value, a fake credential, or guess at a decision to keep
+   moving -- that produces work that looks done but silently isn't, which is
+   worse than stopping. Commit only whatever is genuinely finished and does
+   not depend on the missing input (nothing half-done or broken -- same rule
+   as FAILED below). This is a stronger, rarer outcome than PARTIAL: it
+   halts the ENTIRE automated run, not just this task, so use it only when
+   the missing thing is truly mission-critical to doing this task well, not
+   merely convenient to have. Then output exactly this as the last line of
+   your final message:
+   ${task_marker}_NEEDS_INPUT: <exactly what you need from the operator --
+   name the specific secret/credential/account/decision>::<why the result
+   would be materially worse without it, specifically -- not just "it would
+   help">
+
+4. FAILED -- you cannot finish this task AT ALL (truly blocked: ambiguous
    spec, broken toolchain, local infrastructure that will not start; this is
-   different from PARTIAL, which still finishes and commits everything else).
+   different from PARTIAL, which still finishes and commits everything else,
+   and different from NEEDS_INPUT, which is specifically about something
+   only the operator can provide, not an internal blocker).
    Do not commit broken or partial-and-undisclosed work. Instead output
    exactly this as the last line of your final message:
    ${task_marker}_FAILED: <short reason>
@@ -1657,7 +1737,7 @@ to finish before doing anything else; if it already finished, use its
 result. Do not end this turn again until you know whether this task's
 deliverables and verification pass.
 
-Then follow the same completion instructions as before.${SHARED_MODULE_SYNC_NOTE:+ Remember: ${SHARED_MODULE_SYNC_NOTE}} Do not edit ${ROADMAP_FILE} yourself. Recall there are three
+Then follow the same completion instructions as before.${SHARED_MODULE_SYNC_NOTE:+ Remember: ${SHARED_MODULE_SYNC_NOTE}} Do not edit ${ROADMAP_FILE} yourself. Recall there are four
 possible outcomes:
 1. If everything passes, commit your changes, then output exactly this as
    the very last line of your final message:
@@ -1669,7 +1749,15 @@ possible outcomes:
    items separated by "; " if more than one:
    ${task_marker}_PARTIAL: <deliverable text, copied VERBATIM from
    ${ROADMAP_FILE}>::<short reason>
-3. If you cannot finish this task at all, do not commit broken or
+3. If this task genuinely cannot be done well without something only the
+   operator can provide right now (a real credential the code needs to
+   function, an account/registration, a decision only they can make -- not
+   merely convenient, mission-critical), do not guess or use a placeholder.
+   Commit only what's genuinely finished, then output exactly this as the
+   last line:
+   ${task_marker}_NEEDS_INPUT: <exactly what you need>::<why the result
+   would be materially worse without it>
+4. If you cannot finish this task at all, do not commit broken or
    partial-and-undisclosed work. Instead output exactly this as the last line
    of your final message:
    ${task_marker}_FAILED: <short reason>
@@ -2079,8 +2167,24 @@ EOF
             build_implement_prompt "$TASK_LABEL" "$TASK_MARKER" "$TASK_SCOPE" "$COMMIT_PREFIX" \
                 "$VERIFY_SENTENCE" "$TASK_CONTEXT" "$FINDINGS"
             run_claude_turn "$TASK_LABEL" "$IMPLEMENT_PROMPT_INIT" "$IMPLEMENT_PROMPT_CONTINUE" \
-                "${TASK_MARKER}_COMPLETE|${TASK_MARKER}_PARTIAL" "${TASK_MARKER}_FAILED"
+                "${TASK_MARKER}_COMPLETE|${TASK_MARKER}_PARTIAL|${TASK_MARKER}_NEEDS_INPUT" "${TASK_MARKER}_FAILED"
             IMPLEMENT_TURN_OUTPUT="$CLAUDE_TURN_OUTPUT"
+
+            # NEEDS_INPUT is checked FIRST and is terminal for the whole run,
+            # not just this task -- unlike PARTIAL (which defers and keeps
+            # going) this means the task genuinely cannot be done well
+            # without something only the operator can provide. Do not run
+            # the gate or review, do not mark the task complete, do not
+            # touch the roadmap -- just stop and say exactly what's needed,
+            # see NEEDS_INPUT HANDLING in the file header.
+            if grep -qE "${TASK_MARKER}_NEEDS_INPUT:" <<<"$IMPLEMENT_TURN_OUTPUT"; then
+                NEEDS_INPUT_CLAIM="$(grep -oE "${TASK_MARKER}_NEEDS_INPUT:.*" <<<"$IMPLEMENT_TURN_OUTPUT" | tail -1 | sed -E "s/^${TASK_MARKER}_NEEDS_INPUT:[[:space:]]*//")"
+                NEEDS_INPUT_ITEM="${NEEDS_INPUT_CLAIM%%::*}"
+                NEEDS_INPUT_REASON="${NEEDS_INPUT_CLAIM#*::}"
+                STOP_KIND="needs-input"
+                stop_run 1 "$TASK_LABEL cannot proceed without operator-provided information. Needed: ${NEEDS_INPUT_ITEM}. Why: ${NEEDS_INPUT_REASON}. See ${RESUME_DOC} for how to resume once it's provided."
+            fi
+
             TASK_PARTIAL_CLAIM=""
             if grep -qE "${TASK_MARKER}_PARTIAL:" <<<"$IMPLEMENT_TURN_OUTPUT"; then
                 TASK_PARTIAL_CLAIM="$(grep -oE "${TASK_MARKER}_PARTIAL:.*" <<<"$IMPLEMENT_TURN_OUTPUT" | tail -1 | sed -E "s/^${TASK_MARKER}_PARTIAL:[[:space:]]*//")"
