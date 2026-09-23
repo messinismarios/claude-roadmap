@@ -105,6 +105,32 @@ LAST_AUTOMATABLE_PHASE=
 # fast instead of blindly retrying into the same wall three times.
 # MAX_TURN_BUDGET_USD=""
 
+# Model and effort for every Claude turn, passed as --model/--effort. Empty
+# (default) inherits the claude CLI's own settings. Each stage can override
+# both; an empty override falls back to CLAUDE_MODEL/CLAUDE_EFFORT. The
+# model/effort used is recorded with each turn's cost in specs/.roadmap-cost.
+# CLAUDE_MODEL=""; CLAUDE_EFFORT=""
+# PLAN_MODEL="sonnet";   PLAN_EFFORT="medium"
+# IMPLEMENT_MODEL="opus"; IMPLEMENT_EFFORT="medium"
+# REVIEW_MODEL="opus";   REVIEW_EFFORT="medium"
+# DOCUMENT_MODEL="sonnet"; DOCUMENT_EFFORT="medium"
+
+# Passed as --settings to every turn (a path relative to the repo root, or a
+# JSON string) -- e.g. {"enabledPlugins": {"<plugin>": false},
+# "disableAllHooks": true} to drop plugins and hooks meant for interactive
+# work. CLAUDE_STRICT_MCP=true adds --strict-mcp-config, so turns load no MCP
+# servers at all.
+# CLAUDE_SETTINGS=""
+# CLAUDE_STRICT_MCP=false
+
+# true: a ### N.M section unit skips the PLAN turn and runs as one task (the
+# roadmap author already split it). false (default): every unit is planned.
+# SKIP_PLAN_FOR_SECTIONS=false
+
+# On a gate failure, this many trailing lines of the gate's output are put
+# straight into the retry turn's findings.
+# GATE_FINDINGS_TAIL_LINES=80
+
 # false (default): skip the DOCUMENT stage -- no specs/qa/<unit-slug>.md is
 # written for completed units. true: run it, producing a QA/manual-testing
 # doc per unit (see stage 5 in run-roadmap.sh's header). It's a whole extra

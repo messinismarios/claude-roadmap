@@ -298,6 +298,16 @@ NTFY_TOPIC=""                                    # ntfy.sh topic for phone push 
 NTFY_VERBOSE=false                               # false: only ping the phone for run start/stop, unit/phase completion, quota waits. true: ping on every notify().
 WRITE_QA_DOC=false                               # false (default): skip the DOCUMENT stage entirely -- no specs/qa/<unit-slug>.md is written. true: run it as described in stage 5 above. Override per-run without touching the config file, e.g. `WRITE_QA_DOC=true bash run-roadmap.sh`.
 MAX_TURN_BUDGET_USD=""                           # empty: no per-turn cost cap. Set e.g. "5.00" to pass --max-budget-usd to every claude invocation.
+CLAUDE_MODEL=""                                  # empty: inherit the claude CLI's own settings. Otherwise passed as --model (e.g. "opus", "sonnet", "claude-opus-5-5").
+CLAUDE_EFFORT=""                                 # empty: inherit. Otherwise passed as --effort (low|medium|high|xhigh|max).
+PLAN_MODEL="";      PLAN_EFFORT=""               # per-stage overrides of CLAUDE_MODEL/CLAUDE_EFFORT; empty falls back to those.
+IMPLEMENT_MODEL=""; IMPLEMENT_EFFORT=""
+REVIEW_MODEL="";    REVIEW_EFFORT=""
+DOCUMENT_MODEL="";  DOCUMENT_EFFORT=""
+CLAUDE_SETTINGS=""                               # empty: none. Otherwise passed as --settings (a file path relative to the repo root, or a JSON string) -- e.g. to disable plugins/hooks the runner's turns don't need.
+CLAUDE_STRICT_MCP=false                          # true: pass --strict-mcp-config so turns load no MCP servers (user- or project-configured).
+SKIP_PLAN_FOR_SECTIONS=false                     # true: a ### N.M section unit skips the PLAN turn and runs as one task -- the roadmap author already split it.
+GATE_FINDINGS_TAIL_LINES=80                      # on a gate failure, this many trailing lines of its output go straight into the retry's findings.
 RETRY_WAIT_SECONDS=1800
 MAX_NON_QUOTA_RETRIES=3
 MAX_REVIEW_CYCLES=6
@@ -358,6 +368,7 @@ STATUS_FILE="$RUNTIME_DIR/status"
 TASK_STATE_FILE="$RUNTIME_DIR/task-state"
 PENDING_PIVOT_FILE="$RUNTIME_DIR/pending-pivot"
 STOP_AFTER_FILE="$RUNTIME_DIR/stop-after"        # sticky "task" | "phase" -- see pending_stop_after()
+GATE_OUTPUT_FILE="$RUNTIME_DIR/last-gate-failure.log"   # output of the most recent failed gate run, fed to the retry
 STREAM_PARSE_JS="$SCRIPT_DIR/roadmap-stream-parse.js"
 
 # ---------------------------------------------------------------------------
@@ -1309,8 +1320,23 @@ record_turn_failure() {
 # real verdict needs a human, not an infinite loop. A /stop also stops the
 # whole run, deliberately, via stop_run.
 run_claude_turn() {
-    local label="$1" init_prompt="$2" continue_prompt="$3" done_re="$4" explicit_fail_re="${5:-}"
+    local label="$1" init_prompt="$2" continue_prompt="$3" done_re="$4" explicit_fail_re="${5:-}" stage="${6:-}"
     local fail_count=0
+
+    # Model/effort: the stage's own override (e.g. REVIEW_MODEL), else the
+    # run-wide CLAUDE_MODEL/CLAUDE_EFFORT, else whatever the CLI's settings say.
+    local model="$CLAUDE_MODEL" effort="$CLAUDE_EFFORT" var
+    if [[ -n "$stage" ]]; then
+        var="${stage}_MODEL";  [[ -n "${!var:-}" ]] && model="${!var}"
+        var="${stage}_EFFORT"; [[ -n "${!var:-}" ]] && effort="${!var}"
+    fi
+    local extra_claude_args=()
+    [[ -n "$MAX_TURN_BUDGET_USD" ]] && extra_claude_args+=(--max-budget-usd "$MAX_TURN_BUDGET_USD")
+    [[ -n "$model" ]] && extra_claude_args+=(--model "$model")
+    [[ -n "$effort" ]] && extra_claude_args+=(--effort "$effort")
+    [[ -n "$CLAUDE_SETTINGS" ]] && extra_claude_args+=(--settings "$CLAUDE_SETTINGS")
+    [[ "$CLAUDE_STRICT_MCP" == "true" ]] && extra_claude_args+=(--strict-mcp-config)
+    local cost_label="$label [${model:-default}/${effort:-default}]"
 
     while true; do
         local turn_dir infile outfile errfile statefile textfile metafile stopflag
@@ -1319,9 +1345,6 @@ run_claude_turn() {
         statefile="$turn_dir/parse-state.json"; textfile="$turn_dir/text.txt"; metafile="$turn_dir/meta.env"
         stopflag="$turn_dir/stop.flag"
         : > "$infile"; : > "$textfile"
-
-        local extra_claude_args=()
-        [[ -n "$MAX_TURN_BUDGET_USD" ]] && extra_claude_args=(--max-budget-usd "$MAX_TURN_BUDGET_USD")
 
         (
             sent=0
@@ -1413,7 +1436,7 @@ ${init_prompt}"
 
         CLAUDE_TURN_OUTPUT=""
         [[ -f "$textfile" ]] && CLAUDE_TURN_OUTPUT="$(cat "$textfile")"
-        record_turn_cost "$label" "${SESSION_COST_USD:-}"
+        record_turn_cost "$cost_label" "${SESSION_COST_USD:-}"
 
         case "$outcome" in
             done)
@@ -1620,10 +1643,19 @@ EOF
 You are starting with zero prior conversation context, running unattended in
 ${REPO_DESCRIPTION}
 
-First read ${ROADMAP_FILE} in full and these spec files: ${SPEC_FILES}.
+First read, in ${ROADMAP_FILE}, this unit's own section in full plus every
+cross-cutting part (hard constraints, "never do X" lists, conventions) --
+skip other phases' deliverable lists. Then read whichever of these spec files
+bear on this task, as deeply as the task needs: ${SPEC_FILES}. An independent
+reviewer reads all of them in full afterwards.
 
 ${scope_sentence} Match the existing conventions of whichever part of the
 repo you are editing.
+
+CONTEXT HYGIENE: redirect the output of any build, test, lint, install or
+docker command that can be long (gradle, xcodebuild, npm test, compose logs,
+...) to a file and read only its tail or grep it for failures -- never let a
+full build or test log land in your context.
 ${task_context}${shared_module_block}
 VERIFICATION:
 ${verify_block}
@@ -1812,7 +1844,7 @@ EOF
         repo_diff_hint="No new commits were found from this task -- that is itself worth flagging as a review issue unless the task was a no-op by its own nature."
     fi
 
-    local gate_note="A deterministic gate (plain script, not an LLM) has already independently re-run this repo's own verification command against this diff and it passed -- you do not need to re-verify that; spend your attention on what automation can't check."
+    local gate_note="A deterministic gate (plain script, not an LLM) has already independently re-run this repo's own verification command against this diff and it passed -- do not re-run it or the full test suites; spend your attention on what automation can't check. If you do run a command with long output, redirect it to a file and read only the tail or grep it."
     [[ -z "$GATE_CMD" ]] && gate_note="This repo has no automated verification gate configured, so nothing has been independently re-verified yet -- factor that into how much scrutiny you give correctness, not just intent."
 
     local constraints_block=""
@@ -2054,6 +2086,9 @@ run_verification_gate() {
     if (( gate_exit != 0 )); then
         notify "$label: deterministic gate FAILED (exit $gate_exit). See $LOG_FILE."
         echo "$gate_output" >> "$LOG_FILE"
+        # Kept on its own so the retry turn gets the failure itself, not a
+        # log file full of every earlier turn's raw stream-json.
+        printf '%s\n' "$gate_output" > "$GATE_OUTPUT_FILE"
         return 1
     fi
     notify "$label: deterministic gate passed."
@@ -2095,12 +2130,18 @@ for (( i=START_INDEX; i<=MAX_INDEX; i++ )); do
 
     if [[ -s "$PLAN_FILE" ]]; then
         mapfile -t TASKS < <(grep -v '^[[:space:]]*$' "$PLAN_FILE")
+    elif (( IS_GROUP )) && [[ "$SKIP_PLAN_FOR_SECTIONS" == "true" ]]; then
+        # A ### section is already a split the roadmap author made -- a whole
+        # Claude turn to decide "don't split" isn't worth its tokens.
+        printf '%s\n' "$SCOPE_SENTENCE" > "$PLAN_FILE"
+        TASKS=("$SCOPE_SENTENCE")
+        commit_progress_if_repo "Roadmap: $LABEL plan written (1 task, section -- plan turn skipped)"
     else
         set_stage "planning $LABEL"
         notify "Planning $LABEL"
         build_plan_prompt "$LABEL" "$MARKER" "$SCOPE_SENTENCE" "$PLAN_FILE"
         run_claude_turn "$LABEL (plan)" "$PLAN_PROMPT_INIT" "$PLAN_PROMPT_CONTINUE" \
-            "${MARKER}_PLAN_SPLIT|${MARKER}_PLAN_NOSPLIT" "${MARKER}_PLAN_FAILED"
+            "${MARKER}_PLAN_SPLIT|${MARKER}_PLAN_NOSPLIT" "${MARKER}_PLAN_FAILED" PLAN
 
         if [[ ! -s "$PLAN_FILE" ]]; then
             # Defensive fallback: the planning turn reported success but did
@@ -2167,7 +2208,7 @@ EOF
             build_implement_prompt "$TASK_LABEL" "$TASK_MARKER" "$TASK_SCOPE" "$COMMIT_PREFIX" \
                 "$VERIFY_SENTENCE" "$TASK_CONTEXT" "$FINDINGS"
             run_claude_turn "$TASK_LABEL" "$IMPLEMENT_PROMPT_INIT" "$IMPLEMENT_PROMPT_CONTINUE" \
-                "${TASK_MARKER}_COMPLETE|${TASK_MARKER}_PARTIAL|${TASK_MARKER}_NEEDS_INPUT" "${TASK_MARKER}_FAILED"
+                "${TASK_MARKER}_COMPLETE|${TASK_MARKER}_PARTIAL|${TASK_MARKER}_NEEDS_INPUT" "${TASK_MARKER}_FAILED" IMPLEMENT
             IMPLEMENT_TURN_OUTPUT="$CLAUDE_TURN_OUTPUT"
 
             # NEEDS_INPUT is checked FIRST and is terminal for the whole run,
@@ -2201,7 +2242,8 @@ EOF
                     STOP_KIND="error"
                     stop_run 1 "$TASK_LABEL failed the deterministic gate $MAX_NON_QUOTA_RETRIES times. Stopping run for manual review."
                 fi
-                FINDINGS="The deterministic gate (an independent re-run of this repo's GATE_CMD, outside your control) failed after your last attempt. See ${LOG_FILE} on this machine for the failure output. Fix whatever is causing it to fail before ending your turn again."
+                FINDINGS="The deterministic gate (an independent re-run of this repo's GATE_CMD, outside your control) failed after your last attempt. The last ${GATE_FINDINGS_TAIL_LINES} lines of its output are below; the full output is in ${GATE_OUTPUT_FILE} (grep it, don't read it whole). Fix whatever is causing it to fail before ending your turn again.
+$(tail -n "$GATE_FINDINGS_TAIL_LINES" "$GATE_OUTPUT_FILE" 2>/dev/null)"
                 save_task_state "$UNIT" "$t"
                 continue
             fi
@@ -2213,7 +2255,7 @@ EOF
             notify "Starting review of $TASK_LABEL"
             build_review_prompt "$TASK_LABEL" "$TASK_MARKER" "$TASK_SCOPE" "$REPO_HEAD_BEFORE" "$TASK_PARTIAL_CLAIM"
             run_claude_turn "$TASK_LABEL (review)" "$REVIEW_PROMPT_INIT" "$REVIEW_PROMPT_CONTINUE" \
-                "${TASK_MARKER}_REVIEW_OK|${TASK_MARKER}_REVIEW_ISSUES"
+                "${TASK_MARKER}_REVIEW_OK|${TASK_MARKER}_REVIEW_ISSUES" "" REVIEW
 
             if grep -qE "${TASK_MARKER}_REVIEW_OK" <<<"$CLAUDE_TURN_OUTPUT"; then
                 notify "$TASK_LABEL passed review."
@@ -2274,7 +2316,7 @@ EOF
         DOC_MARKER="${MARKER}_DOC"
         build_document_prompt "$LABEL" "$DOC_MARKER" "$(unit_start_head_for "$UNIT")" "$DOC_PATH" "$DEFERRED_BLOCK" "$(unit_review_notes_for "$UNIT")"
         run_claude_turn "$LABEL (document)" "$DOCUMENT_PROMPT_INIT" "$DOCUMENT_PROMPT_CONTINUE" \
-            "${DOC_MARKER}_WRITTEN" "${DOC_MARKER}_FAILED"
+            "${DOC_MARKER}_WRITTEN" "${DOC_MARKER}_FAILED" DOCUMENT
         if [[ ! -s "$DOC_PATH" ]]; then
             notify_important "$LABEL: document turn reported success but ${DOC_PATH} is missing/empty -- writing a minimal fallback so QA still has something to read."
             {
