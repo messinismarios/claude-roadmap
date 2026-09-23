@@ -47,11 +47,10 @@
 //                      LAST_SUBTYPE=<string>       e.g. success, error_max_turns, ...
 //                      LAST_API_ERROR_STATUS=<n>   HTTP-style status if present, else empty
 //                      LAST_RESULT_TEXT_LINES=<n>  how many text lines this call appended
-//                      SESSION_COST_USD=<n>        sum of total_cost_usd across every
-//                                                   result event this session has produced
-//                                                   so far (a session may cover several
-//                                                   result events -- nudges, live /pivot
-//                                                   replies -- each with its own cost)
+//                      SESSION_COST_USD=<n>        the session's cost so far: the latest
+//                                                   total_cost_usd, which the CLI reports as
+//                                                   a running total across every result
+//                                                   event (nudges, live /pivot replies)
 //                      LAST_TERMINAL_REASON=<str>  the most recent result event's
 //                                                   terminal_reason (e.g. "completed"),
 //                                                   used to fail fast on a per-turn
@@ -162,7 +161,9 @@ if (toRead > 0) {
           : obj.api_error_status;
       state.lastTerminalReason = obj.terminal_reason || "";
       if (typeof obj.total_cost_usd === "number" && Number.isFinite(obj.total_cost_usd)) {
-        state.cumulativeCostUsd = (state.cumulativeCostUsd || 0) + obj.total_cost_usd;
+        // total_cost_usd is already the session's running total, not this
+        // result's own cost -- summing it re-counted every earlier result.
+        state.cumulativeCostUsd = Math.max(state.cumulativeCostUsd || 0, obj.total_cost_usd);
       }
       // If this result is an error and the turn produced no assistant
       // text at all (e.g. a transport-level failure before any
